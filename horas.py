@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+from io import BytesIO
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Control de Horas y Costes", layout="wide", initial_sidebar_state="expanded")
@@ -28,6 +29,13 @@ st.markdown("""
 
 st.title("⏱️ Control de Horas e Importes")
 
+# --- FUNCIONES DE APOYO ---
+def to_excel(df_export):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_export.to_excel(writer, index=False, sheet_name='Resumen_Costes')
+    return output.getvalue()
+
 # --- BARRA LATERAL ---
 archivos = [f for f in os.listdir(CARPETA_DATOS) if f.endswith('.csv')]
 
@@ -46,7 +54,6 @@ with st.sidebar:
 
     if archivos:
         archivo_sel = st.selectbox("📅 Seleccionar Mes", sorted(archivos, reverse=True))
-        # Intentamos cargar con latin-1 y separador punto y coma
         df = pd.read_csv(os.path.join(CARPETA_DATOS, archivo_sel), sep=';', decimal=',', encoding='latin-1')
         df.columns = [c.strip() for c in df.columns]
         bases = sorted(df['code_base'].dropna().unique())
@@ -62,6 +69,9 @@ if df is not None:
 
         st.subheader(f"Vista: {archivo_sel} | Base: {base_sel}")
 
+        # Lista para guardar los datos que irán al Excel
+        datos_para_excel = []
+
         html = '<div class="scroll-container"><table>'
         html += '<thead><tr><th class="col-nombre">Empleado / Totales</th>'
         for dia in col_dias:
@@ -70,41 +80,37 @@ if df is not None:
         html += '</tr></thead><tbody>'
 
         for _, fila in df_filtrado.iterrows():
-            # Convertimos los valores de los días a números
             valores_dias = pd.to_numeric(fila[col_dias], errors='coerce').fillna(0)
-            
-            # --- LÓGICA DE CÁLCULO DE EXCESOS ---
-            # Solo sumamos si el valor del día es > 8. Si es menor, sumamos 0.
             horas_extra_totales = valores_dias.apply(lambda x: x - 8 if x > 8 else 0).sum()
             
-            # Datos informativos de contexto
             real_total = float(fila['ti_totalefectivo'])
             dias_activos = (valores_dias > 0).sum()
             previsto_total = dias_activos * 8
-            
-            # Cálculo del importe basado solo en los excesos acumulados
             importe_pagar = horas_extra_totales * precio_hora_extra
             
-            # Color para el balance de extras (siempre positivo o neutro ahora)
-            color_bal = "#2ecc71" if horas_extra_totales > 0 else "#95a5a6"
+            # Guardar en la lista para Excel
+            datos_para_excel.append({
+                "Empleado": fila["nombre_operador"],
+                "Horas Reales": real_total,
+                "Horas Previstas": previsto_total,
+                "Horas Extra": horas_extra_totales,
+                "Importe Extra (€)": round(importe_pagar, 2)
+            })
 
-            # Celda de nombre y resumen
+            # Color y diseño HTML
+            color_bal = "#2ecc71" if horas_extra_totales > 0 else "#95a5a6"
             html += f'<tr><td class="col-nombre" title="{fila["nombre_operador"]}">'
             html += f'<span class="nombre-txt">{fila["nombre_operador"]}</span>'
             html += f'<span class="info-mini">Prev:{int(previsto_total)}h | Real:{real_total}h</span>'
             html += f'<span class="info-mini"><b style="color:{color_bal}">Extras: +{horas_extra_totales:.2f}h</b></span>'
-            
             if horas_extra_totales > 0:
                 html += f'<div class="importe-total">Total Extra: {importe_pagar:.2f} €</div>'
             html += f'</td>'
 
-            # Celdas diarias
             for i, dia in enumerate(col_dias):
                 v_dia = valores_dias.iloc[i]
                 if v_dia > 0:
                     exceso = v_dia - 8
-                    # Visualmente mantenemos el Rojo para avisar si hizo menos de 8, 
-                    # pero ya sabemos que no resta en el total superior.
                     clase = "pos" if exceso > 0 else "neg" if exceso < 0 else "neu"
                     txt = f"+{exceso:g}" if exceso > 0 else f"{exceso:g}"
                     html += f'<td><span class="v-box {clase}">{txt}</span></td>'
@@ -114,6 +120,17 @@ if df is not None:
 
         html += '</tbody></table></div>'
         st.write(html, unsafe_allow_html=True)
+
+        # --- BOTÓN DE EXCEL EN LA SIDEBAR (debajo de todo) ---
+        df_excel = pd.DataFrame(datos_para_excel)
+        excel_data = to_excel(df_excel)
+        st.sidebar.divider()
+        st.sidebar.download_button(
+            label="📥 Descargar Resumen Excel",
+            data=excel_data,
+            file_name=f"Resumen_{base_sel}_{archivo_sel.replace('.csv', '')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     except Exception as e:
         st.error(f"Error al procesar los datos: {e}")

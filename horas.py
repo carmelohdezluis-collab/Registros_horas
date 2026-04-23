@@ -3,14 +3,14 @@ import pandas as pd
 import os
 from io import BytesIO
 
-# --- CONFIGURACIÓN ---
+# --- 1. CONFIGURACIÓN ---
 st.set_page_config(page_title="Control de Horas y Costes", layout="wide", initial_sidebar_state="expanded")
 CARPETA_DATOS = "registros_horas"
 
 if not os.path.exists(CARPETA_DATOS):
     os.makedirs(CARPETA_DATOS)
 
-# --- ESTILOS CSS ---
+# --- 2. ESTILOS CSS ---
 st.markdown("""
     <style>
     .scroll-container { overflow-x: auto; width: 100%; border: 1px solid #ddd; border-radius: 5px; }
@@ -27,110 +27,112 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("⏱️ Control de Horas e Importes")
-
-# --- FUNCIONES DE APOYO ---
-def to_excel(df_export):
+# --- 3. FUNCIÓN DE EXCEL CORREGIDA ---
+def generar_excel_total(df_completo, precio_hora):
     output = BytesIO()
+    # Importante: engine='xlsxwriter' debe estar instalado
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_export.to_excel(writer, index=False, sheet_name='Resumen_Costes')
+        # 1. Filtramos bases únicas
+        bases = df_completo['code_base'].dropna().unique()
+        
+        for base in sorted(bases):
+            # Filtrar datos de la base actual
+            df_b = df_completo[df_completo['code_base'] == base].copy()
+            cols_d = [c for c in df_b.columns if c.startswith('D')]
+            
+            # Crear lista de resumen para esta base
+            resumen_data = []
+            for _, fila in df_b.iterrows():
+                v_dias = pd.to_numeric(fila[cols_d], errors='coerce').fillna(0)
+                excesos = v_dias.apply(lambda x: x - 8 if x > 8 else 0).sum()
+                
+                resumen_data.append({
+                    "Empleado": fila["nombre_operador"],
+                    "Base": base,
+                    "Total Efectivo": fila.get('ti_totalefectivo', 0),
+                    "Horas Extra": excesos,
+                    "Importe (€)": round(excesos * precio_hora, 2)
+                })
+            
+            # Convertir a DataFrame y limpiar nombre de pestaña
+            df_hoja = pd.DataFrame(resumen_data)
+            # Excel no permite: : \ / ? * [ ] en nombres de pestaña y max 31 caracteres
+            nombre_limpio = str(base).replace(':','').replace('/','').replace('\\','').replace('*','').replace('?','').replace('[','').replace(']','')[:31]
+            if not nombre_limpio: nombre_limpio = f"Base_{base}"
+            
+            df_hoja.to_excel(writer, index=False, sheet_name=nombre_limpio)
+            
     return output.getvalue()
 
-# --- BARRA LATERAL ---
+# --- 4. INTERFAZ Y CARGA ---
+st.title("⏱️ Control de Horas e Importes")
 archivos = [f for f in os.listdir(CARPETA_DATOS) if f.endswith('.csv')]
 
 with st.sidebar:
-    st.header("💰 Configuración de Costes")
-    precio_hora_extra = st.number_input("Precio Hora Extra (€)", value=13.89, step=0.01, format="%.2f")
+    st.header("💰 Configuración")
+    precio_hora_extra = st.number_input("Precio Hora Extra (€)", value=13.89, step=0.01)
     
     st.divider()
-    st.header("📁 Gestión de Archivos")
-    nuevo_archivo = st.file_uploader("Añadir nuevo mes (CSV)", type=["csv"])
+    st.header("📁 Archivos")
+    nuevo_archivo = st.file_uploader("Subir CSV", type=["csv"])
     if nuevo_archivo:
         with open(os.path.join(CARPETA_DATOS, nuevo_archivo.name), "wb") as f:
             f.write(nuevo_archivo.getbuffer())
-        st.success("Guardado correctamente")
+        st.success("Guardado")
         st.rerun()
 
     if archivos:
-        archivo_sel = st.selectbox("📅 Seleccionar Mes", sorted(archivos, reverse=True))
+        archivo_sel = st.selectbox("📅 Mes", sorted(archivos, reverse=True))
+        # Carga del CSV
         df = pd.read_csv(os.path.join(CARPETA_DATOS, archivo_sel), sep=';', decimal=',', encoding='latin-1')
         df.columns = [c.strip() for c in df.columns]
-        bases = sorted(df['code_base'].dropna().unique())
-        base_sel = st.selectbox("📍 Base", bases)
+        
+        lista_bases = sorted(df['code_base'].dropna().unique())
+        base_sel = st.selectbox("📍 Ver Base", lista_bases)
+        
+        # BOTÓN DE EXCEL
+        st.divider()
+        try:
+            excel_bin = generar_excel_total(df, precio_hora_extra)
+            st.download_button(
+                label="📥 Descargar Excel Todas las Bases",
+                data=excel_bin,
+                file_name=f"Resumen_{archivo_sel.replace('.csv', '')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except Exception as e:
+            st.error(f"Error generando Excel: {e}")
     else:
         df = None
 
-# --- VISUALIZACIÓN ---
+# --- 5. TABLA VISUAL ---
 if df is not None:
-    try:
-        df_filtrado = df[df['code_base'] == base_sel].copy()
-        col_dias = [c for c in df.columns if c.startswith('D')]
+    df_f = df[df['code_base'] == base_sel].copy()
+    col_dias = [c for c in df.columns if c.startswith('D')]
 
-        st.subheader(f"Vista: {archivo_sel} | Base: {base_sel}")
+    html = '<div class="scroll-container"><table><thead><tr><th class="col-nombre">Empleado</th>'
+    for d in col_dias: html += f'<th>{d.replace("D", "")[:2]}</th>'
+    html += '</tr></thead><tbody>'
 
-        # Lista para guardar los datos que irán al Excel
-        datos_para_excel = []
+    for _, fila in df_f.iterrows():
+        v_dias = pd.to_numeric(fila[col_dias], errors='coerce').fillna(0)
+        extras = v_dias.apply(lambda x: x - 8 if x > 8 else 0).sum()
+        color_bal = "#2ecc71" if extras > 0 else "#95a5a6"
 
-        html = '<div class="scroll-container"><table>'
-        html += '<thead><tr><th class="col-nombre">Empleado / Totales</th>'
-        for dia in col_dias:
-            num = dia.replace('D', '')[:2]
-            html += f'<th>{num}</th>'
-        html += '</tr></thead><tbody>'
+        html += f'<tr><td class="col-nombre">'
+        html += f'<span class="nombre-txt">{fila["nombre_operador"]}</span>'
+        html += f'<span class="info-mini"><b style="color:{color_bal}">Extras: +{extras:.2f}h</b></span>'
+        if extras > 0: html += f'<div class="importe-total">{(extras * precio_hora_extra):.2f} €</div>'
+        html += '</td>'
 
-        for _, fila in df_filtrado.iterrows():
-            valores_dias = pd.to_numeric(fila[col_dias], errors='coerce').fillna(0)
-            horas_extra_totales = valores_dias.apply(lambda x: x - 8 if x > 8 else 0).sum()
-            
-            real_total = float(fila['ti_totalefectivo'])
-            dias_activos = (valores_dias > 0).sum()
-            previsto_total = dias_activos * 8
-            importe_pagar = horas_extra_totales * precio_hora_extra
-            
-            # Guardar en la lista para Excel
-            datos_para_excel.append({
-                "Empleado": fila["nombre_operador"],
-                "Horas Reales": real_total,
-                "Horas Previstas": previsto_total,
-                "Horas Extra": horas_extra_totales,
-                "Importe Extra (€)": round(importe_pagar, 2)
-            })
-
-            # Color y diseño HTML
-            color_bal = "#2ecc71" if horas_extra_totales > 0 else "#95a5a6"
-            html += f'<tr><td class="col-nombre" title="{fila["nombre_operador"]}">'
-            html += f'<span class="nombre-txt">{fila["nombre_operador"]}</span>'
-            html += f'<span class="info-mini">Prev:{int(previsto_total)}h | Real:{real_total}h</span>'
-            html += f'<span class="info-mini"><b style="color:{color_bal}">Extras: +{horas_extra_totales:.2f}h</b></span>'
-            if horas_extra_totales > 0:
-                html += f'<div class="importe-total">Total Extra: {importe_pagar:.2f} €</div>'
-            html += f'</td>'
-
-            for i, dia in enumerate(col_dias):
-                v_dia = valores_dias.iloc[i]
-                if v_dia > 0:
-                    exceso = v_dia - 8
-                    clase = "pos" if exceso > 0 else "neg" if exceso < 0 else "neu"
-                    txt = f"+{exceso:g}" if exceso > 0 else f"{exceso:g}"
-                    html += f'<td><span class="v-box {clase}">{txt}</span></td>'
-                else:
-                    html += '<td><span class="punto">·</span></td>'
-            html += '</tr>'
-
-        html += '</tbody></table></div>'
-        st.write(html, unsafe_allow_html=True)
-
-        # --- BOTÓN DE EXCEL EN LA SIDEBAR (debajo de todo) ---
-        df_excel = pd.DataFrame(datos_para_excel)
-        excel_data = to_excel(df_excel)
-        st.sidebar.divider()
-        st.sidebar.download_button(
-            label="📥 Descargar Resumen Excel",
-            data=excel_data,
-            file_name=f"Resumen_{base_sel}_{archivo_sel.replace('.csv', '')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    except Exception as e:
-        st.error(f"Error al procesar los datos: {e}")
+        for i, d in enumerate(col_dias):
+            v = v_dias.iloc[i]
+            if v > 0:
+                exc = v - 8
+                clase = "pos" if exc > 0 else "neg" if exc < 0 else "neu"
+                html += f'<td><span class="v-box {clase}">{exc:g}</span></td>'
+            else: html += '<td><span class="punto">·</span></td>'
+        html += '</tr>'
+    
+    html += '</tbody></table></div>'
+    st.write(html, unsafe_allow_html=True)
